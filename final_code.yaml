@@ -1,0 +1,302 @@
+AWSTemplateFormatVersion: 2010-09-09
+Parameters:
+  Email:
+    Description: mails on autoscling alarms
+    Type: String
+    AllowedPattern: >-
+      ([a-zA-Z0-9_\-\.]+)@((\[[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.)|(([a-zA-Z0-9\-]+\.)+))([a-zA-Z]{2,4}|[0-9]{1,3})(\]?)
+  KeyName:
+    Description: Existing key pair in the env
+    Type: 'AWS::EC2::KeyPair::KeyName'
+  dbpasswd:
+    Description: The IP address range that can be used to SSH to the EC2 instances
+    Type: String
+    MinLength: 8
+    NoEcho: true
+  SSHLocation:
+    Description: The IP address range that can be used to SSH to the EC2 instances
+    Type: String
+    MinLength: 9
+    MaxLength: 18
+    Default: 0.0.0.0/0
+    AllowedPattern: '(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})/(\d{1,2})'
+    ConstraintDescription: should follow cidr format x.x.x.x/x.
+Resources:
+  serversg:
+    Type: 'AWS::EC2::SecurityGroup'
+    Properties:
+      VpcId: vpc-504df73b
+      GroupDescription: allow connections from specified CIDR ranges
+      SecurityGroupIngress:
+        - Description: permit https access from on-prim
+          IpProtocol: tcp
+          FromPort: 3306
+          ToPort: 3306
+          CidrIp: 0.0.0.0/0
+  dbsubnetgroup:
+    Type: 'AWS::RDS::DBSubnetGroup'
+    Properties:
+      DBSubnetGroupDescription: DB subnet group for development environment
+      DBSubnetGroupName: dbsubnetgroup
+      SubnetIds:
+        - subnet-e500a28e
+        - subnet-896221c5
+        - subnet-28594252
+  wordpressdbinstance:
+    Type: 'AWS::RDS::DBInstance'
+    Properties:
+      AllocatedStorage: 20
+      AvailabilityZone: us-east-2a
+      DBInstanceClass: db.t2.micro
+      DBInstanceIdentifier: rds-wordpress
+      DBName: wordpress
+      DBSubnetGroupName: !Ref dbsubnetgroup
+      Engine: MySQL
+      EngineVersion: 5.7.19
+      MasterUsername: root
+      MasterUserPassword: !Ref dbpasswd
+      Port: 3306
+      PubliclyAccessible: false
+      VPCSecurityGroups:
+        - !GetAtt serversg.GroupId
+  NotificationTopic:
+    Type: 'AWS::SNS::Topic'
+    Properties:
+      Subscription:
+        - Endpoint: !Ref Email
+          Protocol: email
+  wordpressserverpool:
+    Type: 'AWS::AutoScaling::AutoScalingGroup'
+    Properties:
+      AvailabilityZones:
+        - us-east-2a
+        - us-east-2b
+      LaunchConfigurationName: !Ref LaunchConfig
+      MinSize: '1'
+      MaxSize: '3'
+      LoadBalancerNames:
+        - !Ref ElasticLoadBalancer
+      NotificationConfigurations:
+        - TopicARN: !Ref NotificationTopic
+          NotificationTypes:
+            - 'autoscaling:EC2_INSTANCE_LAUNCH'
+            - 'autoscaling:EC2_INSTANCE_LAUNCH_ERROR'
+            - 'autoscaling:EC2_INSTANCE_TERMINATE'
+            - 'autoscaling:EC2_INSTANCE_TERMINATE_ERROR'
+    UpdatePolicy:
+      AutoScalingRollingUpdate:
+        MinInstancesInService: 1
+        MaxBatchSize: 1
+        PauseTime: PT15M
+        WaitOnResourceSignals: true
+  LaunchConfig:
+    Type: 'AWS::AutoScaling::LaunchConfiguration'
+    DependsOn:
+      - wordpressdbinstance
+    Properties:
+      KeyName: !Ref KeyName
+      ImageId: ami-0170fc126935d44c3
+      SecurityGroups:
+        - !Ref InstanceSecurityGroup
+      InstanceType: t2.micro
+      UserData:
+        'Fn::Base64':
+          'Fn::Join':
+            - ''
+            - - '#!/usr/bin/bash'
+              - |-
+
+                 yum install https://dl.fedoraproject.org/pub/epel/epel-release-latest-7.noarch.rpm -y
+              - |-
+
+                 export identifier=
+              - !GetAtt wordpressdbinstance.Endpoint.Address
+              - |-
+
+                 export password=
+              - !Ref dbpasswd
+              - |-
+
+                 yum install https://dl.fedoraproject.org/pub/epel/epel-release-latest-7.noarch.rpm -y
+              - |-
+
+                 yum install http://rpms.remirepo.net/enterprise/remi-release-7.rpm -y
+              - |-
+
+                 yum install yum-utils -y
+              - |-
+
+                 yum-config-manager --enable remi-php72   [Install PHP 7.2]
+              - |-
+
+                 yum install httpd wget -y 
+              - |-
+
+                 systemctl start httpd.service
+              - |-
+
+                 systemctl enable httpd.service
+              - |-
+
+                 yum install mariadb-server mariadb -y
+              - |-
+
+                 systemctl start mariadb
+              - |-
+
+                 systemctl enable mariadb.service
+              - |-
+
+                 yum-config-manager --enable remi-php72   [Install PHP 7.2]
+              - |-
+
+                 yum install php php-mcrypt php-cli php-gd php-curl php-mysql php-ldap php-zip php-fileinfo -y
+              - |-
+
+                 systemctl restart httpd.service
+              - |-
+
+                 cd ~
+              - |-
+
+                 wget http://wordpress.org/latest.tar.gz
+              - |-
+
+                 tar xzvf latest.tar.gz
+              - |-
+
+                 rsync -avP ~/wordpress/ /var/www/html/
+              - |-
+
+                 mkdir /var/www/html/wp-content/uploads
+              - |-
+
+                 chown -R apache:apache /var/www/html/*
+              - |-
+
+                 setenforce 0
+              - |-
+
+                 cd /var/www/html
+              - |-
+
+                 cp wp-config-sample.php wp-config.php
+              - |-
+
+                 sed -i s/database_name_here/wordpress/g /var/www/html/wp-config.php
+              - |-
+
+                 sed -i s/username_here/root/g /var/www/html/wp-config.php
+              - |-
+
+                 sed -i s/password_here/$password/g /var/www/html/wp-config.php
+              - |-
+
+                 sed -i s/localhost/$identifier/g /var/www/html/wp-config.php
+              - |-
+
+                 chown apache:apache wp-config.php
+              - |-
+
+                 setsebool -P httpd_can_network_connect 1
+              - |-
+
+                 setsebool -P httpd_can_network_relay 1
+              - |-
+
+                 setsebool -P tomcat_can_network_connect_db 1
+              - |-
+
+                 systemctl restart httpd
+  WebServerScaleUpPolicy:
+    Type: 'AWS::AutoScaling::ScalingPolicy'
+    Properties:
+      AdjustmentType: ChangeInCapacity
+      AutoScalingGroupName: !Ref wordpressserverpool
+      Cooldown: '60'
+      ScalingAdjustment: 1
+  WebServerScaleDownPolicy:
+    Type: 'AWS::AutoScaling::ScalingPolicy'
+    Properties:
+      AdjustmentType: ChangeInCapacity
+      AutoScalingGroupName: !Ref wordpressserverpool
+      Cooldown: '60'
+      ScalingAdjustment: -1
+  CPUAlarmHigh:
+    Type: 'AWS::CloudWatch::Alarm'
+    Properties:
+      AlarmDescription: Scale-up if CPU > 90% for 10 minutes
+      MetricName: CPUUtilization
+      Namespace: AWS/EC2
+      Statistic: Average
+      Period: 300
+      EvaluationPeriods: 2
+      Threshold: 90
+      AlarmActions:
+        - !Ref WebServerScaleUpPolicy
+      Dimensions:
+        - Name: AutoScalingGroupName
+          Value: !Ref wordpressserverpool
+      ComparisonOperator: GreaterThanThreshold
+  CPUAlarmLow:
+    Type: 'AWS::CloudWatch::Alarm'
+    Properties:
+      AlarmDescription: Scale-down if CPU < 70% for 10 minutes
+      MetricName: CPUUtilization
+      Namespace: AWS/EC2
+      Statistic: Average
+      Period: 300
+      EvaluationPeriods: 2
+      Threshold: 70
+      AlarmActions:
+        - !Ref WebServerScaleDownPolicy
+      Dimensions:
+        - Name: AutoScalingGroupName
+          Value: !Ref wordpressserverpool
+      ComparisonOperator: LessThanThreshold
+  ElasticLoadBalancer:
+    Type: 'AWS::ElasticLoadBalancing::LoadBalancer'
+    Properties:
+      AvailabilityZones:
+        - us-east-2a
+        - us-east-2b
+      CrossZone: true
+      Scheme: internet-facing
+      Listeners:
+        - LoadBalancerPort: '80'
+          InstancePort: '80'
+          Protocol: HTTP
+      HealthCheck:
+        Target: 'HTTP:80/'
+        HealthyThreshold: '3'
+        UnhealthyThreshold: '5'
+        Interval: '30'
+        Timeout: '5'
+  InstanceSecurityGroup:
+    Type: 'AWS::EC2::SecurityGroup'
+    Properties:
+      GroupDescription: Enable SSH access and HTTP from the load balancer only
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: !Ref SSHLocation
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: !Ref SSHLocation
+          SourceSecurityGroupOwnerId: !GetAtt 
+            - ElasticLoadBalancer
+            - SourceSecurityGroup.OwnerAlias
+          SourceSecurityGroupName: !GetAtt 
+            - ElasticLoadBalancer
+            - SourceSecurityGroup.GroupName
+Outputs:
+  URL:
+    Description: The URL of the website
+    Value: !Join 
+      - ''
+      - - 'http://'
+        - !GetAtt 
+          - ElasticLoadBalancer
+          - DNSName
